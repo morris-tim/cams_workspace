@@ -355,7 +355,7 @@ from sensor_msgs.msg import Joy
 import serial
 
 
-PICO_PORT = '/dev/ttyAMA3'
+PICO_PORT = '/dev/ttyACM0'
 BAUD_RATE = 115200
 
 # Axis indices
