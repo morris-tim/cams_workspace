@@ -47,10 +47,10 @@ limit-cycle oscillation around the setpoint.
 """
 
 from machine import Pin, PWM, I2C, UART
-import struct, time, math
+import struct, time, math, sys, uselect
 
 # ── Inner loop (balance) tuning ───────────────────────────────────────────────
-SETPOINT       =  -1.0    # base tilt target (degrees)
+SETPOINT       =  -0.8    # base tilt target (degrees)
 KP             =  1000.0
 KI             =  0.0
 KD             =  700.0
@@ -77,7 +77,7 @@ MOTOR_OFFSET   = 30000
 TRANSITION     = 2800
 
 # ── Drive scaling ─────────────────────────────────────────────────────────────
-MAX_DRIVE_ANGLE = 1.5       # degrees of lean at full stick
+MAX_DRIVE_ANGLE = -4# degrees of lean at full stick
 VEL_DRIVE_SCALE = 5500.0    # full trigger → ±3700 ticks/sec velocity target
 TURN_SCALE      = 10000.0   # ±0.3 max turn → ±4500 PWM differential
 
@@ -325,79 +325,79 @@ def parse_serial():
     global drive_offset, drive_offset_target, boost_val, turn_cmd
     global VEL_SETPOINT, VEL_SETPOINT_TARGET
     global kick_pwm, prev_trigger_armed
+    global poll_obj
 
-    if not _uart.any():
+    if not poll_obj.poll(0):
         return
+    _serial_buf = sys.stdin.readline()
 
-    _serial_buf += _uart.read(_uart.any())
+    line = _serial_buf.strip()
 
-    while b'\n' in _serial_buf:
-        line, _serial_buf = _serial_buf.split(b'\n', 1)
-        line = line.strip().decode('utf-8', 'ignore')
+    if line == 'K':
+        killed              = True
+        drive_offset        = 0.0
+        drive_offset_target = 0.0
+        boost_val           = 0.0
+        turn_cmd            = 0.0
+        VEL_SETPOINT        = 0.0
+        VEL_SETPOINT_TARGET = 0.0
+        integral            = 0.0
+        vel_integral        = 0.0
+        vel_offset          = 0.0
+        vel_filtered_d      = 0.0
+        kick_pwm            = 0.0
+        prev_trigger_armed  = False
+        stop_motors()
+        print("CMD: KILL")
 
-        if line == 'K':
-            killed              = True
-            drive_offset        = 0.0
-            drive_offset_target = 0.0
-            boost_val           = 0.0
-            turn_cmd            = 0.0
-            VEL_SETPOINT        = 0.0
-            VEL_SETPOINT_TARGET = 0.0
-            integral            = 0.0
-            vel_integral        = 0.0
-            vel_offset          = 0.0
-            vel_filtered_d      = 0.0
-            kick_pwm            = 0.0
-            prev_trigger_armed  = False
-            stop_motors()
-            print("CMD: KILL")
+    elif line == 'R':
+        killed              = False
+        drive_offset        = 0.0
+        drive_offset_target = 0.0
+        boost_val           = 0.0
+        turn_cmd            = 0.0
+        VEL_SETPOINT        = 0.0
+        VEL_SETPOINT_TARGET = 0.0
+        integral            = 0.0
+        prev_angle          = tilt_angle
+        vel_integral        = 0.0
+        vel_prev_error      = 0.0
+        vel_filtered_d      = 0.0
+        vel_offset          = 0.0
+        kick_pwm            = 0.0
+        prev_trigger_armed  = False
+        enc_left.reset()
+        enc_right.reset()
+        print("CMD: RESUME")
 
-        elif line == 'R':
-            killed              = False
-            drive_offset        = 0.0
-            drive_offset_target = 0.0
-            boost_val           = 0.0
-            turn_cmd            = 0.0
-            VEL_SETPOINT        = 0.0
-            VEL_SETPOINT_TARGET = 0.0
-            integral            = 0.0
-            prev_angle          = tilt_angle
-            vel_integral        = 0.0
-            vel_prev_error      = 0.0
-            vel_filtered_d      = 0.0
-            vel_offset          = 0.0
-            kick_pwm            = 0.0
-            prev_trigger_armed  = False
-            enc_left.reset()
-            enc_right.reset()
-            print("CMD: RESUME")
+    elif line == 'S':
+        drive_offset_target = 0.0
+        boost_val           = 0.0
+        turn_cmd            = 0.0
+        VEL_SETPOINT_TARGET = 0.0
+        prev_trigger_armed  = False
+        print("CMD: STOP")
 
-        elif line == 'S':
-            drive_offset_target = 0.0
-            boost_val           = 0.0
-            turn_cmd            = 0.0
-            VEL_SETPOINT_TARGET = 0.0
-            prev_trigger_armed  = False
-            print("CMD: STOP")
+    elif line.startswith('D'):
+        try:
+            print("Movement CMD\n\n\n")
+            rest = line[1:]
+            d_str, rest2 = rest.split(',T')
+            t_str, b_str = rest2.split(',B')
+            joy_val      = float(d_str)
+            boost_val    = float(b_str)
+            turn_cmd     = float(t_str)
+            print(f"\n\n\n\n\n\n\n{joy_val} {boost_val} {turn_cmd}")
 
-        elif line.startswith('D'):
-            try:
-                rest = line[1:]
-                d_str, rest2 = rest.split(',T')
-                t_str, b_str = rest2.split(',B')
-                joy_val      = float(d_str)
-                boost_val    = float(b_str)
-                turn_cmd     = float(t_str)
+            drive_offset_target = joy_val  * MAX_DRIVE_ANGLE
+            VEL_SETPOINT_TARGET = boost_val * VEL_DRIVE_SCALE
 
-                drive_offset_target = joy_val  * MAX_DRIVE_ANGLE
-                VEL_SETPOINT_TARGET = boost_val * VEL_DRIVE_SCALE
-
-                trigger_armed = boost_val > TRIGGER_EDGE
-                if trigger_armed and not prev_trigger_armed:
-                    kick_pwm = KICK_PWM
-                prev_trigger_armed = trigger_armed
-            except Exception:
-                print(f"CMD: parse error — '{line}'")
+            trigger_armed = boost_val > TRIGGER_EDGE
+            if trigger_armed and not prev_trigger_armed:
+                kick_pwm = KICK_PWM
+            prev_trigger_armed = trigger_armed
+        except Exception:
+            print(f"CMD: parse error — '{line}'")
 
 # ── Startup ───────────────────────────────────────────────────────────────────
 time.sleep_ms(2000)
@@ -416,6 +416,9 @@ print(f"CAMS Bot — smooth deadband (offset={MOTOR_OFFSET}, transition={TRANSIT
 print(f"  KP={KP}  KD={KD}  SETPOINT={SETPOINT}°")
 print("Send K to kill, R to resume")
 
+global poll_obj
+poll_obj = uselect.poll()
+poll_obj.register(sys.stdin, uselect.POLLIN)
 # ── Main loop ─────────────────────────────────────────────────────────────────
 next_tick = time.ticks_us()
 interval  = int(DT * 1_000_000)

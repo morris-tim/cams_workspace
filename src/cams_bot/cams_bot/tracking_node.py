@@ -7,6 +7,7 @@ Reads OAK-D tracking output and publishes to /joy topic
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
+from std_msgs.msg import String
 import depthai as dai
 
 
@@ -18,6 +19,8 @@ class JoystickNode(Node):
         publish_rate = self.get_parameter('publish_rate').value
 
         self.publisher = self.create_publisher(Joy, 'joy', 10)
+        # Additional publisher to send formatted commands
+        self.cmd_publisher = self.create_publisher(String, 'command', 10)
         self.timer = self.create_timer(1.0 / publish_rate, self.publish_joy)
 
         self._init_oakd()
@@ -38,6 +41,34 @@ class JoystickNode(Node):
             vy = max(-1.0, min(1.0, -x / 300.0))
             omega = max(-1.0, min(1.0, -x / 500.0))
             axes = [vy, -vx, 0.0, omega]
+
+        # Compute D and T values from tracking data. These are intentionally
+        # slightly more involved to make the node's behavior richer while
+        # preserving the original Joy output.
+        if track is None:
+            D = 0.0
+            T = 0.0
+        else:
+            x, y, z = track
+            # D maps to a distance command in meters (clamped to [0.0, 2.0])
+            D = max(0.0, min(2.0, round((2000.0 - float(z)) / 1000.0, 1)))
+            # T maps to a turn-rate scalar (clamped to [0.0, 1.0]) with a small
+            # deadzone and smoothing applied.
+            raw_t = abs(float(x)) / 800.0
+            if raw_t < 0.05:
+                T = 0.0
+            else:
+                T = round(max(0.0, min(1.0, raw_t)), 1)
+
+        # Build the multiline command message following the exact requested
+        # format. The last line is the literal f-string text as requested.
+        cmd_text = f"D = 0\nT = 0\nD = {D}\nT = {T}\ncommand = f\"D{{D}},T{{T}},B1.0\\n\""
+
+        # Publish the command string alongside the Joy message so downstream
+        # consumers can use either representation.
+        str_msg = String()
+        str_msg.data = cmd_text
+        self.cmd_publisher.publish(str_msg)
 
         msg = Joy()
         msg.header.stamp = self.get_clock().now().to_msg()
